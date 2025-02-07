@@ -23,9 +23,6 @@ import qualified BlueRipple.Model.Evangelical.Model as RM
 import qualified BlueRipple.Model.Election2.DataPrep as DP
 import qualified BlueRipple.Model.Election2.ModelCommon as MC
 import qualified BlueRipple.Model.Election2.ModelRunner as MR
-import qualified BlueRipple.Model.Demographic.DataPrep as DDP
-import qualified BlueRipple.Model.Demographic.EnrichCensus as DMC
-import qualified BlueRipple.Model.Demographic.TableProducts as DTP
 import qualified BlueRipple.Data.Small.Loaders as BRL
 import qualified BlueRipple.Data.Small.DataFrames as BR
 
@@ -35,18 +32,17 @@ import qualified BlueRipple.Data.Types.Demographic as DT
 import qualified BlueRipple.Data.Types.Geographic as GT
 import qualified BlueRipple.Data.Types.Modeling as MT
 import qualified BlueRipple.Data.CES as CCES
-import qualified BlueRipple.Data.ACS_PUMS as ACS
 import qualified BlueRipple.Data.ACS_Tables_Loaders as BRC
 import qualified BlueRipple.Data.ACS_Tables as BRC
 import qualified BlueRipple.Utilities.KnitUtils as BR
+import qualified BlueRipple.Tools.StateLeg.ModeledACS as BSLACS
 
 import qualified Knit.Report as K
 import qualified Knit.Effect.AtomicCache as KC
 import qualified Text.Pandoc.Error as Pandoc
 import qualified System.Console.CmdArgs as CmdArgs
 
-import qualified Stan.ModelBuilder.TypedExpressions.Types as TE
-import qualified Stan.ModelBuilder.DesignMatrix as DM
+import qualified Stan as S
 
 import qualified Frames as F
 import qualified Frames.MapReduce as FMR
@@ -89,17 +85,23 @@ templateVars =
 pandocTemplate ∷ K.TemplatePath
 pandocTemplate = K.FullySpecifiedTemplatePath "../../research/pandoc-templates/blueripple_basic.html"
 
-dmr ::  DM.DesignMatrixRow (F.Record DP.LPredictorsR)
-dmr = MC.tDesignMatrixRow_d
+dmr ::  S.DesignMatrixRow (F.Record DP.LPredictorsR)
+dmr = MC.tDesignMatrixRow_d ""
 
-survey :: MC.TurnoutSurvey (F.Record DP.CESByCDR)
-survey = MC.CESSurvey
+--survey :: MC.TurnoutSurvey (F.Record DP.CESByCDR)
+--survey = MC.CESSurvey
 
-aggregation :: MC.SurveyAggregation TE.ECVec
-aggregation = MC.WeightedAggregation MC.ContinuousBinomial
+weightingStyle :: DP.WeightingStyle
+weightingStyle = DP.DesignEffectWeights
 
-alphaModel :: MC.Alphas
-alphaModel = MC.St_A_S_E_R_StR  --MC.St_A_S_E_R_AE_AR_ER_StR
+aggregation :: MC.SurveyAggregation S.ECVec
+aggregation = MC.WeightedAggregation MC.ContinuousBinomial weightingStyle
+
+surveyPortion :: DP.SurveyPortion
+surveyPortion = DP.AllSurveyed DP.Both
+
+--alphaModel :: MC.Alphas
+--alphaModel = MC.St_A_S_E_R_StR  --MC.St_A_S_E_R_AE_AR_ER_StR
 
 type SLDKeyR = '[GT.StateAbbreviation] V.++ BRC.LDLocationR
 type ModeledR = SLDKeyR V.++ '[MR.ModelCI]
@@ -124,21 +126,21 @@ main = do
   resE ← K.knitHtmls knitConfig $ do
     K.logLE K.Info $ "Command Line: " <> show cmdLine
     let postInfo = BR.PostInfo (BR.postStage cmdLine) (BR.PubTimes BR.Unpublished Nothing)
---    modelWhiteEvangelicals cmdLine
-    youthPct cmdLine
-    youthPctPre cmdLine
+    modelWhiteEvangelicals cmdLine
+--    youthPct cmdLine
+--    youthPctPre cmdLine
   case resE of
     Right namedDocs →
       K.writeAllPandocResultsWithInfoAsHtml "" namedDocs
     Left err → putTextLn $ "Pandoc Error: " <> Pandoc.renderError err
 
-youthCountFld5 :: (FC.ElemsOf rs SLDKeyR, FC.ElemsOf rs [DT.Age5C, DT.PopCount]) => FL.Fold (F.Record rs) (F.FrameRec (SLDKeyR V.++ [Pct18To24, Pct18To34]))
+youthCountFld5 :: (FC.ElemsOf rs SLDKeyR, FC.ElemsOf rs [DT.Age5C, DT.PopCount]) => FL.Fold (F.Record rs) (F.FrameRec (SLDKeyR V.++ [DT.PopCount,Pct18To24, Pct18To34]))
 youthCountFld5 =
   let popFld = FL.premap (view DT.popCount) FL.sum
       under25 = (< DT.A5_25To34) . view DT.age5C
       under35 = (< DT.A5_35To44) . view DT.age5C
-      innerFld :: FL.Fold (F.Record [DT.PopCount, DT.Age5C]) (F.Record [Pct18To24, Pct18To34])
-      innerFld = (\x y p -> 100 * realToFrac x / realToFrac p F.&: 100 * realToFrac y / realToFrac p F.&: V.RNil)
+      innerFld :: FL.Fold (F.Record [DT.PopCount, DT.Age5C]) (F.Record [DT.PopCount, Pct18To24, Pct18To34])
+      innerFld = (\x y p -> p F.&: 100 * realToFrac x / realToFrac p F.&: 100 * realToFrac y / realToFrac p F.&: V.RNil)
                  <$> FL.prefilter under25 popFld <*> FL.prefilter under35 popFld <*> popFld
   in FMR.concatFold
      $ FMR.mapReduceFold
@@ -146,14 +148,14 @@ youthCountFld5 =
      (FMR.assignKeysAndData @SLDKeyR @[DT.PopCount, DT.Age5C])
      (FMR.foldAndAddKey innerFld)
 
-youthCountFld6 :: (FC.ElemsOf rs SLDKeyR, FC.ElemsOf rs [DT.Age6C, DT.PopCount]) => FL.Fold (F.Record rs) (F.FrameRec (SLDKeyR V.++ [Pct18To24, Pct18To34]))
+youthCountFld6 :: (FC.ElemsOf rs SLDKeyR, FC.ElemsOf rs [DT.Age6C, DT.PopCount]) => FL.Fold (F.Record rs) (F.FrameRec (SLDKeyR V.++ [DT.PopCount,Pct18To24, Pct18To34]))
 youthCountFld6 =
   let over18 = (> DT.A6_Under18) . view DT.age6C
       popFld = FL.prefilter over18 (FL.premap (view DT.popCount) FL.sum)
       under25 = (< DT.A6_25To34) . view DT.age6C
       under35 = (< DT.A6_35To44) . view DT.age6C
-      innerFld :: FL.Fold (F.Record [DT.PopCount, DT.Age6C]) (F.Record [Pct18To24, Pct18To34])
-      innerFld = (\x y p -> 100 * realToFrac x / realToFrac p F.&: 100 * realToFrac y / realToFrac p F.&: V.RNil)
+      innerFld :: FL.Fold (F.Record [DT.PopCount, DT.Age6C]) (F.Record [DT.PopCount, Pct18To24, Pct18To34])
+      innerFld = (\x y p -> p F.&: 100 * realToFrac x / realToFrac p F.&: 100 * realToFrac y / realToFrac p F.&: V.RNil)
                  <$> FL.prefilter under25 popFld <*> FL.prefilter under35 popFld <*> popFld
   in FMR.concatFold
      $ FMR.mapReduceFold
@@ -162,7 +164,7 @@ youthCountFld6 =
      (FMR.foldAndAddKey innerFld)
 
 writeYouthCount :: (K.KnitEffects r)
-             => Text -> F.FrameRec [GT.DistrictName, TSPStateId, GT.StateAbbreviation, Chamber, Pct18To24, Pct18To34] -> K.Sem r ()
+             => Text -> F.FrameRec [GT.DistrictName, TSPStateId, GT.StateAbbreviation, Chamber, DT.PopCount, Pct18To24, Pct18To34] -> K.Sem r ()
 writeYouthCount csvName ycF = do
   let wText = FCSV.formatTextAsIs
       printNum n m = PF.printf ("%" <> show n <> "." <> show m <> "g")
@@ -180,10 +182,12 @@ writeYouthCount csvName ycF = do
                       V.:& FCSV.quoteField FCSV.formatTextAsIs
                       V.:& FCSV.formatTextAsIs
                       V.:& FCSV.formatTextAsIs
+                      V.:& FCSV.formatWithShow
                       V.:& wPrintf 2 2
                       V.:& wPrintf 2 2
                       V.:& V.RNil
       newHeaderMap = M.fromList [("StateAbbreviation", "state_code")
+                                , ("PopCount","Population (CVAP)")
                                 , ("TSPStateId", "state_district_id")
                                 , ("Chamber", "chamber_name")
                                 , ("Pct180To24", "18 To 24 (%)")
@@ -193,16 +197,16 @@ writeYouthCount csvName ycF = do
 
 youthPct :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
 youthPct cmdLine = do
-  modeledACSBySLDPSData_C <- modeledACSBySLD cmdLine BRC.TY2022
+  modeledACSBySLDPSData_C <- BSLACS.modeledACSBySLD BSLACS.Modeled
   acsBySLD <- DP.unPSData <$> K.ignoreCacheTime modeledACSBySLDPSData_C
   let youthPctBySLD = FL.fold youthCountFld5 acsBySLD
-  writeYouthCount "youthPct" $ fmap (F.rcast . addTSPId) youthPctBySLD
+  writeYouthCount "youthPct_2022" $ fmap (F.rcast . addTSPId) youthPctBySLD
 
 youthPctPre :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
 youthPctPre cmdLine = do
   asrBySLD <- givenASRBySLD BRC.TY2022
   let youthPctBySLD = FL.fold youthCountFld6 asrBySLD
-  writeYouthCount "youthPctPre" $ fmap (F.rcast . addTSPId) youthPctBySLD
+  writeYouthCount "youthPctPre_2022" $ fmap (F.rcast . addTSPId) youthPctBySLD
 
 
 modelWhiteEvangelicals :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> K.Sem r ()
@@ -213,7 +217,7 @@ modelWhiteEvangelicals cmdLine = do
                           psName () ()
       modelConfig am = RM.ModelConfig aggregation am (contramap F.rcast dmr)
       modeledToCSVFrame = F.toFrame . fmap (\(k, v) -> k F.<+> FT.recordSingleton @MR.ModelCI v) . M.toList . MC.unPSMap . fst
-  modeledACSBySLDPSData_C <- modeledACSBySLD cmdLine BRC.TY2021
+  modeledACSBySLDPSData_C <- BSLACS.modeledACSBySLD BSLACS.Modeled
 --    districtPSData <- K.ignoreCacheTime modeledACSBySLDPSData_C
   let dBDInnerF :: FL.Fold (F.Record '[DT.Race5C, DT.PopCount]) (F.Record [DT.PopCount, WhiteVAP])
       dBDInnerF =
@@ -241,7 +245,7 @@ modelWhiteEvangelicals cmdLine = do
 --    modeledEvangelical_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2020 (cacheStructure CCES.CES2020) psType (modelConfig MC.St_A_S_E_R) modeledACSBySLDPSData_C
 --    modeledEvangelical_AR_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2020 (cacheStructure CCES.CES2020) psType (modelConfig MC.St_A_S_E_R_AR) modeledACSBySLDPSData_C
 --    modeledEvangelical_StA_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2020 (cacheStructure CCES.CES2020) psType (modelConfig MC.St_A_S_E_R_StA) modeledACSBySLDPSData_C
-  modeledEvangelical22_StR_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2022 (cacheStructure CCES.CES2022) psType (modelConfig MC.St_A_S_E_R_StR) modeledACSBySLDPSData_C
+  modeledEvangelical22_StR_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2022 (cacheStructure CCES.CES2022) psType surveyPortion (modelConfig MC.St_A_S_E_R_StR) modeledACSBySLDPSData_C
 --    modeledEvangelical20_StR_C <- RM.runEvangelicalModel @SLDKeyR CCES.CES2020 (cacheStructure CCES.CES2020) psType (modelConfig MC.St_A_S_E_R_StR) modeledACSBySLDPSData_C
   let compareOn f x y = compare (f x) (f y)
       compareRows x y = compareOn (view GT.stateAbbreviation) x y
@@ -254,7 +258,7 @@ modelWhiteEvangelicals cmdLine = do
 --    K.ignoreCacheTime modeledEvangelical_StA_C >>= writeModeled "modeledEvangelical_StA_GivenWWH" . csvSort . fmap F.rcast . modeledToCSVFrame
   K.ignoreCacheTime modeledEvangelical22_StR_C
     >>= fmap (fmap addTSPId) . addDistrictData . csvSort . fmap F.rcast . modeledToCSVFrame
-    >>= writeModeled "modeledEvangelical22_StR_GivenWWH" . fmap F.rcast
+    >>= writeModeled "modeledEvangelical22_NLCD_StR_GivenWWH" . fmap F.rcast
 --    K.ignoreCacheTime modeledEvangelical20_StR_C >>= writeModeled "modeledEvangelical20_StR_GivenWWH" . csvSort . fmap F.rcast . modeledToCSVFrame
 --    let modeledEvangelicalFrame = modeledToCSVFrame modeledEvangelical
 --    writeModeled "modeledEvangelical_StA_GivenWWH" $ fmap F.rcast modeledEvangelicalFrame
@@ -393,27 +397,38 @@ maNameFix GT.StateUpper n =
   in maybe n T.toUpper $ M.lookup n $ M.fromList maSenateNames
 maNameFix _ x = x
 
-modeledACSBySLD :: (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData SLDKeyR))
-modeledACSBySLD cmdLine ty = do
-  (jointFromMarginalPredictorCSR_ASR_C, _) <- DDP.cachedACSa5ByPUMA  ACS.acs1Yr2012_21 2021 -- most recent available
-                                                 >>= DMC.predictorModel3 @'[DT.CitizenC] @'[DT.Age5C] @DMC.SRCA @DMC.SR
-                                                 (Right "CSR_ASR_ByPUMA")
-                                                 (Right "model/demographic/csr_asr_PUMA")
-                                                 False -- use model not just mean
-                                                 Nothing Nothing . fmap (fmap F.rcast)
-  (jointFromMarginalPredictorCASR_ASE_C, _) <- DDP.cachedACSa5ByPUMA ACS.acs1Yr2012_21 2021 -- most recent available
-                                                  >>= DMC.predictorModel3 @[DT.CitizenC, DT.Race5C] @'[DT.Education4C] @DMC.ASCRE @DMC.AS
-                                                  (Right "CASR_SER_ByPUMA")
-                                                  (Right "model/demographic/casr_ase_PUMA")
-                                                  False -- use model, not just mean
-                                                  Nothing Nothing . fmap (fmap F.rcast)
-  (acsCASERBySLD, _products) <- BRC.censusTablesForSLDs 2024 ty
-                                >>= DMC.predictedCensusCASER' (DTP.viaNearestOnSimplex) (Right "model/election2/sldDemographics")
-                                jointFromMarginalPredictorCSR_ASR_C
-                                jointFromMarginalPredictorCASR_ASE_C
-  BRCC.retrieveOrMakeD ("model/election2/data/sldPSData" <> BRC.yearsText 2024 ty <> ".bin") acsCASERBySLD
-    $ \x -> DP.PSData . fmap F.rcast <$> (BRL.addStateAbbrUsingFIPS $ F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
+{-
+tsModelConfig modelId n =  DTM3.ModelConfig True (DTM3.dmr modelId n)
+                           DTM3.AlphaHierNonCentered DTM3.ThetaSimple DTM3.NormalDist
 
+
+modeledACSBySLD :: forall r . (K.KnitEffects r, BRCC.CacheEffects r) => BR.CommandLine -> BRC.TableYear -> K.Sem r (K.ActionWithCacheTime r (DP.PSData SLDKeyR))
+modeledACSBySLD cmdLine ty = do
+  let (srcWindow, cachedSrc) = ACS.acs1Yr2012_22 @r
+  (jointFromMarginalPredictorCSR_ASR_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
+                                              >>= DMC.predictorModel3 @'[DT.CitizenC] @'[DT.Age5C] @DMC.SRCA @DMC.SR
+                                              (Right "CSR_ASR_ByPUMA")
+                                              (Right "model/demographic/csr_asr_PUMA")
+                                              (DTM3.Model $ tsModelConfig "CSR_ASR_ByPUMA" 71) -- use model not just mean
+                                              False -- not whitened
+                                              Nothing Nothing Nothing . fmap (fmap F.rcast)
+  (jointFromMarginalPredictorCASR_ASE_C, _) <- DDP.cachedACSa5ByPUMA srcWindow cachedSrc 2022 -- most recent available
+                                               >>= DMC.predictorModel3 @[DT.CitizenC, DT.Race5C] @'[DT.Education4C] @DMC.ASCRE @DMC.AS
+                                               (Right "CASR_SER_ByPUMA")
+                                               (Right "model/demographic/casr_ase_PUMA")
+                                               (DTM3.Model $ tsModelConfig "CASR_ASE_ByPUMA" 141) -- use model not just mean
+                                               False -- not whitened
+                                               Nothing Nothing Nothing . fmap (fmap F.rcast)
+  (acsCASERBySLD, _products) <- BRC.censusTablesForSLDs 2024 ty
+                                >>= DMC.predictedCensusCASER' DMC.stateAbbrFromFIPS
+                                (DTP.viaOptimalWeights DTP.euclideanFull 1e-4)
+                                (Right "model/TSP/sldDemographics")
+                                jointFromMarginalPredictorCSR_ASR_C
+                                jo
+                                intFromMarginalPredictorCASR_ASE_C
+  BRCC.retrieveOrMakeD ("model/TSP/data/sldPSData" <> BRC.yearsText 2024 ty <> ".bin") acsCASERBySLD
+    $ \x -> DP.PSData . fmap F.rcast <$> (BRL.addStateAbbrUsingFIPS $ F.filterFrame ((== DT.Citizen) . view DT.citizenC) x)
+-}
 
 type ASRR = '[BR.Year, GT.StateAbbreviation] V.++ BRC.LDLocationR V.++ [DT.Age6C, DT.SexC, BRC.RaceEthnicityC, DT.PopCount]
 
